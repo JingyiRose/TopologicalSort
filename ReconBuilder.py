@@ -3,8 +3,9 @@
 # as specified in Recon.py using the host tree, parasite tree, and reconfiguration 
 # representation in the DTL.
 
-import Recon
-from Recon import TreeType #TODO this is redundant
+from Tree import NodeLayout
+from Tree import TreeType
+from TreeFormatConverter import dict_to_tree
 
 # The input trees are dictionaries of the following form:
 # There is a dummy edge at the top of each tree called 'hTop' (host tree)
@@ -80,7 +81,7 @@ def build_formatted_tree(tree):
                                                (right_child_name, tree_type)]
     return formatted_tree
 
-def createParentDict(H, P):
+def create_parent_dict(H, P):
     """
     :param host_tree:  host tree dictionary
     :param parasite_tree:  parasite tree dictionary
@@ -103,10 +104,7 @@ def uniquify(elements):
     :param elements:  a list whose elements might not be unique
     :return: A list that contains only the unique elements of the input list. 
     """
-    hold_dict = {}
-    for element in elements:
-            hold_dict[element] = 1
-    return list(hold_dict.keys())
+    return list(set(elements))
 
 def build_temporal_graph(host_tree, parasite_tree, reconciliation):
     """
@@ -122,7 +120,7 @@ def build_temporal_graph(host_tree, parasite_tree, reconciliation):
         in the temporal graph.
     """
     # create a dictionary that maps each host and parasite node to its parent
-    parent = createParentDict(host_tree, parasite_tree)
+    parent = create_parent_dict(host_tree, parasite_tree)
     # create temporal graphs for the host and parasite tree
     temporal_host_tree = build_formatted_tree(host_tree)
     temporal_parasite_tree = build_formatted_tree(parasite_tree)
@@ -163,10 +161,11 @@ def build_temporal_graph(host_tree, parasite_tree, reconciliation):
         temporal_graph[node_tuple] = uniquify(temporal_graph[node_tuple])
     return temporal_graph
     
-
+# This is a topological sort based on depth-first-search 
+# https://en.wikipedia.org/wiki/Topological_sorting#Depth-first_search
 def topological_order(temporal_graph):
     """
-    :param: temporal graph as described in the return type of build_temporal_graph
+    :param temporal graph: as described in the return type of build_temporal_graph
     :return: A dictionary in which a key is a node tuple (name, type) as described
         in build_temporal_graph and the value is a positive integer representing its topological ordering.
         The ordering numbers are consecutive values beginning at 1.
@@ -175,43 +174,44 @@ def topological_order(temporal_graph):
     """
     # the ordering of nodes starts at 1
     next_order = 1
-    unvisited_nodes = list(temporal_graph.keys())
+    unvisited_nodes = set(temporal_graph.keys())
     # the visitng_nodes is used to detect cycles. If the visiting_nodes add an element that is already
     # in the list, then we have found a cycle
-    visiting_nodes = []
+    visiting_nodes = set()
     ordering_dict = {}
-    while unvisited_nodes != []:
+    while unvisited_nodes:
         start_node = unvisited_nodes.pop()
-        hasCycle, next_order = topological_order_helper(temporal_graph, next_order, start_node, unvisited_nodes,\
-                                visiting_nodes, ordering_dict)
+        hasCycle, next_order = topological_order_helper(start_node, next_order, visiting_nodes,
+                               unvisited_nodes, temporal_graph, ordering_dict)
         # If the graph has a cycle, there is no valid topological ordering
         if hasCycle: return None
     # we need to reverse the ordering of the nodes
-    reverse_ordering(ordering_dict, next_order)
+    for node_tuple in ordering_dict:
+        ordering_dict[node_tuple] = next_order - ordering_dict[node_tuple]
     return ordering_dict 
-            
-def topological_order_helper(temporal_graph, start_order, start_node, unvisited_nodes, visiting_nodes, ordering_dict):
+           
+def topological_order_helper(start_node, start_order, visiting_nodes, unvisited_nodes, temporal_graph, ordering_dict):
     """
-    :param: temporal graph as described in the return type of build_temporal_graph
-    :param: start_order is the order we start to label the nodes with
-    :param: start_node is the starting node to explore the temporal_graph
-    :param: unvisited_nodes are nodes in temporal graph that have not been visited
-    :param: visiting_nodes are nodes that are on the same path and are currently being explored
-    :param: ordering_dict is the dictionary that contains labeled node tuples and their ordering as described
+    :param start_node: is the starting node to explore the temporal_graph
+    :param start_order: is the order we start to label the nodes with
+    :param visiting_nodes: are nodes that are on the same path and are currently being explored
+    :param unvisited_nodes: are nodes in temporal graph that have not been visited
+    :param temporal graph: as described in the return type of build_temporal_graph
+    :param ordering_dict: is the dictionary that contains labeled node tuples and their ordering as described
             in topological_order
     :return: a Boolean value that denotes whether the part of temporal graph reachable from start_node
              contains a cycle
     :return: the start order to be used by the remaing nodes of temporal graph that have not been labeled
     """
     next_order = start_order
-    # if the current node is a leaf, we do not label it and we are done
-    if start_node not in temporal_graph:
+    is_leaf = start_node not in temporal_graph
+    if is_leaf:
         return False, next_order
     else:
-        # if a node has a path to itself, we have found a cycle
-        if start_node in visiting_nodes:
+        has_cycle = start_node in visiting_nodes
+        if has_cycle:
             return True, next_order
-        visiting_nodes.append(start_node)
+        visiting_nodes.add(start_node)
         child_nodes = temporal_graph[start_node]
         for child_node in child_nodes:
             # if the child_node is already labeled, we skip it
@@ -219,27 +219,63 @@ def topological_order_helper(temporal_graph, start_order, start_node, unvisited_
                 continue
             if child_node in unvisited_nodes:
                 unvisited_nodes.remove(child_node)
-            hasCycle, next_order = topological_order_helper(temporal_graph, next_order, 
-                                    child_node, unvisited_nodes, visiting_nodes, ordering_dict)
+            has_cycle_child, next_order = topological_order_helper(child_node, next_order,  visiting_nodes,
+                                   unvisited_nodes, temporal_graph, ordering_dict)
             # if we find a cycle, we stop the process
-            if hasCycle: return True, next_order
+            if has_cycle_child: return True, next_order
         # if children are all labeled, we can label the start_node
         visiting_nodes.remove(start_node)
         ordering_dict[start_node] = next_order
         return False, next_order+1
 
-def reverse_ordering(ordering_dict, next_order):
+def populate_nodes_with_order(tree_node, tree_type, ordering_dict, leaf_order):
     """
-    :param: ordering_dict as described in topological_order. The current ordering of the nodes need to be reversed.
-    :param: next_order is next order that has not been used. It is 1 larger than the max order in ordering_dict
-    :return: None
+    :param tree_node: the root node of the subtree we want to populate the temporal order information
+    :param tree_type: the type of the tree
+    :param ordering_dict: a dictionary that maps node tuples to their temporal order as described in topological_order
+    :param leaf_order: the temporal order we should assign to the leaves of the tree
     """
-    for node_tuple in ordering_dict:
-        current_order = ordering_dict[node_tuple]
-        updated_order = next_order - current_order
-        ordering_dict[node_tuple] = updated_order
-    return 
+    layout = NodeLayout()
+    if tree_node.is_leaf:
+        layout.col = leaf_order
+        tree_node.layout = layout
+    else:
+        node_tuple = (tree_node.name, tree_type)
+        layout.col = ordering_dict[node_tuple]
+        tree_node.layout = layout
+        populate_nodes_with_order(tree_node.left_node, tree_type, ordering_dict, leaf_order)
+        populate_nodes_with_order(tree_node.right_node, tree_type, ordering_dict, leaf_order)
 
+
+def build_trees_with_temporal_order(host_tree, parasite_tree, reconciliation):
+    """
+    :param host_tree: host tree dictionary
+    :param parasite_tree: parasite tree dictionary
+    :param reconciliation: reconciliation dictionary
+    :return: a Tree object of type HOST and a Tree object of type PARASITE. If we can find a valid temporal
+             ordering for the nodes, then the nodes in both trees will have their
+             layout field populated that contains the temporal order information
+    """
+
+    # find the temporal order for host nodes and parasite nodes
+    temporal_graph = build_temporal_graph(host_tree, parasite_tree, reconciliation)
+    ordering_dict = topological_order(temporal_graph)
+
+    host_tree_object = dict_to_tree(host_tree, TreeType.HOST)
+    parasite_tree_object = dict_to_tree(parasite_tree, TreeType.PARASITE)
+
+    # if there is a valid temporal ordering, we populate the layout with the order corresponding to the node
+    if ordering_dict != None:
+        # calculate the temporal order for leaves, which all have the largest order
+        max_order = 1
+        for node in ordering_dict:
+            if max_order < ordering_dict[node]:
+                max_order = ordering_dict[node]
+        leaf_order = max_order + 1
+        populate_nodes_with_order(host_tree_object.root_node, TreeType.HOST, ordering_dict, leaf_order)
+        populate_nodes_with_order(parasite_tree_object.root_node, TreeType.PARASITE, ordering_dict, leaf_order)
+    
+    return host_tree_object, parasite_tree_object  
 
 
 # _get_names_of_internal_nodes(host_tree) will return [m0, m2]
